@@ -53,9 +53,26 @@ public class Server implements Runnable {
         }
     }
 
+    private void runProcess(){
+        try {
+            while (true) {
+                int nConnections = selector.selectNow();
+                if(nConnections == 0){
+                    Thread.sleep(3000);
+                    log.logi("server sleep 3secs but no connections");
+                    continue;
+                }
+
+            }
+        } catch(IOException | InterruptedException e){
+            e.printStackTrace();
+        }
+    }
 
     @Override
     public void run() {
         isActive = init();
+        runProcess();
     }
+
 }
