@@ -4,11 +4,15 @@ import logging.Log;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
+import java.nio.charset.Charset;
 import java.util.Iterator;
-import java.util.Set;
+import java.util.LinkedList;
+import java.util.Objects;
+import java.util.Queue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 
 public class Server implements Runnable {
@@ -25,11 +29,15 @@ public class Server implements Runnable {
 
     private String host = DEFAULT_HOST;
     private int port = DEFAULT_PORT;
-
-    private ServerSocketChannel socketChannel;
+    private ServerSocketChannel serverSocketChannel;
     private Selector selector;
-    private SocketAddress socketAddress;
-    private boolean isActive = false;
+    private SelectionKey serverKey;
+    private InetSocketAddress address;
+
+
+    private final BlockingQueue<byte[]> messages = new ArrayBlockingQueue<>(SEND_BUFFER_SIZE);
+
+    private volatile boolean isActive = false;
     public Server(){}
 
     public Server(int port){
@@ -37,124 +45,192 @@ public class Server implements Runnable {
     }
 
     /*
+        GETTERS
+           &
+        SETTERS
+     */
+    private void setActive(boolean active) {
+        isActive = active;
+    }
+
+    /*
         METHODS
      */
-    private boolean init(){
+    private void init(){
         try {
-            socketAddress = new InetSocketAddress(host,port);
-            selector = Selector.open();
-            socketChannel = ServerSocketChannel.open();
-            socketChannel.configureBlocking(false);
-            socketChannel.bind(socketAddress);
-            socketChannel.socket().setReceiveBufferSize(RCV_BUFFER_SIZE);
-            int ops = socketChannel.validOps();
-            socketChannel.register(selector,ops);
 
-            log.logi("server listening on "+socketAddress);
-            return true;
+            address = new InetSocketAddress(host, port);
+            selector = Selector.open();
+            serverSocketChannel = ServerSocketChannel.open();
+            serverSocketChannel.configureBlocking(false);
+            serverSocketChannel.bind(address);
+//            serverSocketChannel.socket().setReceiveBufferSize(RCV_BUFFER_SIZE);
+//            int ops = serverSocketChannel.validOps();
+            serverKey = serverSocketChannel.register(selector,SelectionKey.OP_ACCEPT);
+            log.logi("server listening on "+ address);
+            setActive(true);
 
         } catch (IOException e) {
             e.printStackTrace();
-            return false;
+            setActive(false);
         }
     }
 
-    private void runProcess(){
-        try {
-            while (true) {
-                int nConnections = selector.selectNow();
-                Set<SelectionKey> selectionKeys = selector.selectedKeys();
+    private void runProcess() throws IOException, InterruptedException {
 
-                if(nConnections == 0){
-                    Thread.sleep(3000);
-                    log.logi("server sleep 3secs but no connections");
-                    continue;
-                }
+        SelectionKey serverKey = serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+        while (isActive) {
+            int nConnections = selector.selectNow();
+            Iterator<SelectionKey> it = selector.selectedKeys().iterator();
 
-                selectionProcess(selectionKeys);
+            if(nConnections == 0){
+                Thread.sleep(3000);
+//                    log.logi("server sleep 3secs but no connections");
+                continue;
             }
-        } catch(IOException | InterruptedException e){
-            e.printStackTrace();
+            selectionProcess(it);
         }
+        selector.close();
+        serverSocketChannel.close();
     }
 
-    private void selectionProcess(Set<SelectionKey> keys){
-        Iterator<SelectionKey> iterator = keys.iterator();
+    private void selectionProcess(Iterator<SelectionKey> iterator){
         SelectionKey key;
 
         while (iterator.hasNext()){
+
             key = iterator.next();
             iterator.remove();
 
-            if (key.isValid()){
-                if (key.isAcceptable()) accept(key);
-                if (key.isWritable()) write(key);
-                if (key.isReadable()) read(key);
+            if (key.isAcceptable()) accept();
+            if (key.isWritable() && key.isValid()) write(key);
+            if (key.isReadable() && key.isValid()) read(key);
+        }
+        while (messages.peek()!=null){
+            for (SelectionKey selectionKey : selector.keys()){
+                if(selectionKey!=serverKey){
+                    Attachment attachment = (Attachment) selectionKey.attachment();
+                    attachment.writeQueue.add(ByteBuffer.wrap(Objects.requireNonNull(messages.poll())));
+                    selectionKey.interestOps(selectionKey.interestOps() | SelectionKey.OP_WRITE);
+
+                }
             }
-            keys.clear();
         }
     }
 
-    private void accept(SelectionKey key) {
+    private void accept() {
         try {
-            ServerSocketChannel serverSocket = (ServerSocketChannel) key.channel();
-            SocketChannel client = serverSocket.accept();
+            SocketChannel client = serverSocketChannel.accept();
             client.configureBlocking(false);
-            log.logi("client "+client.getRemoteAddress()+" connected");
-
-            client.register(selector,SelectionKey.OP_WRITE);
+            log.logi("New client connected: "+client.getRemoteAddress());
+            client.register(selector,SelectionKey.OP_READ,new Attachment());
             //TODO ADD MESSAGES QUEUE
-
         } catch (IOException e) {
             e.printStackTrace();
         }
 
     }
+    private void stop(){
+        try {
+            selector.close();
+            serverSocketChannel.close();
+            System.out.println("exit");
 
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
     private void read(SelectionKey key) {
+        Attachment attachment = (Attachment) key.attachment();
         ReadableByteChannel channelIn = (ReadableByteChannel) key.channel();
+        ByteBuffer bufferIn = attachment.readBuffer;
 
-        ByteBuffer bufferIn = ByteBuffer.allocate(RCV_BUFFER_SIZE);
-
-        try {
+        try{
             int bytesRead = channelIn.read(bufferIn);
-            if(bytesRead > 0){
-                log.logi("read "+bytesRead);
-            }else {
-                log.logi("no bytes read");
+
+            if (bytesRead==-1){
+                log.logi("disconnecting");
+                key.cancel();
+                return;
+            }
+            if (bytesRead==0){
+                return;
+            }
+            bufferIn.flip();
+            int limit = bufferIn.limit();
+
+            log.logi("Scanning |"+limit+"| bytes from "+((SocketChannel)channelIn).getRemoteAddress());
+
+            ByteBuffer command = ByteBuffer.allocate(limit);
+            int endOfLastCommand = 0;
+            for (int i = 0; i < limit; i++) {
+                byte b = bufferIn.get();
+                if (b == '\n') {
+                    command.flip();
+                    log.logi("Complete message from client, ["+new String(command.array(), Charset.defaultCharset())+"]");
+                    command.clear();
+                    endOfLastCommand = i;
+                } else {
+                    command.put(b);
+                }
+            }
+            bufferIn.clear();
+            if (endOfLastCommand > 0 && endOfLastCommand != (limit - 1)) {
+                bufferIn.position(endOfLastCommand + 1);
+                bufferIn.compact();
+                bufferIn.position(limit - endOfLastCommand);
             }
 
         } catch (IOException e) {
-            e.printStackTrace();
+            key.cancel();
+            //TODO MAKE ANYTHING WHEN DISCONNECTED
+            System.out.println("connection closed on read");
+//            e.printStackTrace();
         }
-        key.interestOps(SelectionKey.OP_WRITE);
 
     }
-
     private void write(SelectionKey key) {
-        WritableByteChannel channelIn = (WritableByteChannel) key.channel();
+        Attachment state = (Attachment) key.attachment();
+        ByteBuffer buff = state.writeQueue.peek();
 
-        ByteBuffer bufferOut = ByteBuffer.allocate(RCV_BUFFER_SIZE);
-
-        try {
-            int bytesWrite = channelIn.write(bufferOut);
-            if(bytesWrite > 0){
-                log.logi("write "+bytesWrite);
-            }else {
-                log.logi("no bytes write");
-            }
-
-        } catch (IOException e) {
-            e.printStackTrace();
+        if (buff==null){
+            key.interestOps(key.interestOps()&~SelectionKey.OP_WRITE);
+            return;
         }
-
-        key.interestOps(SelectionKey.OP_READ);
+        if (buff.hasRemaining()) {
+            try {
+                WritableByteChannel socket = (WritableByteChannel) key.channel();
+                int bytesWrite = socket.write(buff);
+                System.out.println("write "+bytesWrite);
+            } catch (IOException e) {
+                log.logi("IOException [{}] - disconnecting"+ e.getMessage());
+                key.cancel();
+                return;
+            }
+        }
+        if (buff.remaining() == 0) {
+            state.writeQueue.remove();
+        }
     }
 
     @Override
     public void run() {
-        isActive = init();
-        runProcess();
+        init();
+        try {
+            runProcess();
+        } catch (IOException | InterruptedException e) {
+            e.printStackTrace();
+        }
     }
 
+    public void send(String msg) throws InterruptedException {
+        messages.put(msg.getBytes());
+        selector.wakeup();
+
+    }
+
+    private static class Attachment {
+        final Queue<ByteBuffer> writeQueue = new LinkedList<>();
+        ByteBuffer readBuffer = ByteBuffer.allocate(RCV_BUFFER_SIZE);
+    }
 }
