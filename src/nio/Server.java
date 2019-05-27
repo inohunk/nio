@@ -23,11 +23,12 @@ public class Server implements Runnable {
     private static final Log log = Log.getInstance();
     private static final int DEFAULT_PORT = 2023;
     private static final String DEFAULT_HOST = "localhost";
+    private static final String TEST_HOST = "192.168.43.150";
 
     private static final int SEND_BUFFER_SIZE = 128;
     private static final int RCV_BUFFER_SIZE = 1024;
 
-    private String host = DEFAULT_HOST;
+    private String host = TEST_HOST;
     private int port = DEFAULT_PORT;
     private ServerSocketChannel serverSocketChannel;
     private Selector selector;
@@ -38,6 +39,7 @@ public class Server implements Runnable {
     private final BlockingQueue<byte[]> messages = new ArrayBlockingQueue<>(SEND_BUFFER_SIZE);
 
     private volatile boolean isActive = false;
+
     public Server(){}
 
     public Server(int port){
@@ -49,13 +51,31 @@ public class Server implements Runnable {
            &
         SETTERS
      */
+
     private void setActive(boolean active) {
         isActive = active;
     }
 
     /*
+        INTERFACE
+
+     */
+
+    public void send(String msg) throws InterruptedException {
+        messages.put(msg.getBytes());
+        selector.wakeup();
+
+    }
+    public void setAddress(String host, int port){
+        this.host = host;
+        this.port = port;
+        address = new InetSocketAddress(host,port);
+    }
+
+    /*
         METHODS
      */
+
     private void init(){
         try {
 
@@ -76,7 +96,17 @@ public class Server implements Runnable {
         }
     }
 
-    private void runProcess() throws IOException, InterruptedException {
+    @Override
+    public void run() {
+        init();
+        try {
+            runProcess();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void runProcess() throws IOException {
 
         SelectionKey serverKey = serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
         while (isActive) {
@@ -84,7 +114,7 @@ public class Server implements Runnable {
             Iterator<SelectionKey> it = selector.selectedKeys().iterator();
 
             if(nConnections == 0){
-                Thread.sleep(3000);
+//                Thread.sleep(3000);
 //                    log.logi("server sleep 3secs but no connections");
                 continue;
             }
@@ -124,22 +154,12 @@ public class Server implements Runnable {
             client.configureBlocking(false);
             log.logi("New client connected: "+client.getRemoteAddress());
             client.register(selector,SelectionKey.OP_READ,new Attachment());
-            //TODO ADD MESSAGES QUEUE
         } catch (IOException e) {
             e.printStackTrace();
         }
 
     }
-    private void stop(){
-        try {
-            selector.close();
-            serverSocketChannel.close();
-            System.out.println("exit");
 
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
     private void read(SelectionKey key) {
         Attachment attachment = (Attachment) key.attachment();
         ReadableByteChannel channelIn = (ReadableByteChannel) key.channel();
@@ -184,12 +204,14 @@ public class Server implements Runnable {
         } catch (IOException e) {
             key.cancel();
             //TODO MAKE ANYTHING WHEN DISCONNECTED
-            System.out.println("connection closed on read");
+            log.logi("client "+((SocketChannel)channelIn).socket().getRemoteSocketAddress()+" disconnected");
 //            e.printStackTrace();
         }
 
     }
+
     private void write(SelectionKey key) {
+
         Attachment state = (Attachment) key.attachment();
         ByteBuffer buff = state.writeQueue.peek();
 
@@ -213,21 +235,20 @@ public class Server implements Runnable {
         }
     }
 
-    @Override
-    public void run() {
-        init();
+    private void stop(){
         try {
-            runProcess();
-        } catch (IOException | InterruptedException e) {
+            selector.close();
+            serverSocketChannel.close();
+            System.out.println("exit");
+
+        } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    public void send(String msg) throws InterruptedException {
-        messages.put(msg.getBytes());
-        selector.wakeup();
-
-    }
+    /*
+        INNER CLASSES
+     */
 
     private static class Attachment {
         final Queue<ByteBuffer> writeQueue = new LinkedList<>();
