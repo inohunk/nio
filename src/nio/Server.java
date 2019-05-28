@@ -59,7 +59,6 @@ public class Server implements Runnable {
     private SelectionKey serverKey;
     private InetSocketAddress address;
 
-
     private final BlockingQueue<byte[]> messages = new ArrayBlockingQueue<>(SEND_BUFFER_SIZE);
 
     private volatile boolean isActive = false;
@@ -75,16 +74,13 @@ public class Server implements Runnable {
            &
         SETTERS
      */
-
     private void setActive(boolean active) {
         isActive = active;
     }
 
     /*
-        INTERFACE
-
-     */
-
+        INTERFACES
+    */
     public void send(String msg) throws InterruptedException {
         messages.put(msg.getBytes());
         selector.wakeup();
@@ -97,9 +93,8 @@ public class Server implements Runnable {
     }
 
     /*
-        METHODS
-     */
-
+        FUNCTIONS
+    */
     private void init(){
         try {
 
