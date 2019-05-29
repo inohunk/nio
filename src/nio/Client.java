@@ -27,23 +27,33 @@ package nio;
 import logging.Log;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.util.Arrays;
+import java.util.Iterator;
 
 public class Client implements IClient {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws InterruptedException {
         Client client = new Client();
-        client.sendData("hi");
+        while (true) {
+            client.sendData("hi");
+            Thread.sleep(1000);
+            client.sendData("it's me");
+            Thread.sleep(1000);
+            client.sendData("how are u?");
+            Thread.sleep(3000);
+        }
+
     }
 
     private static final Log log = Log.getInstance();
     private static final String DEFAULT_HOST = "localhost";
+    private static final String TEST_HOST = "192.168.43.150";
     private static final int DEFAULT_PORT = 2023;
-    private static final int DEFAULT_TIMEOUT = 3000;
+
     private static final int SEND_BUFFER_SIZE = 128;
     private static final int RCV_BUFFER_SIZE = 1024;
 
@@ -51,9 +61,8 @@ public class Client implements IClient {
     private static final int KEY_READ = SelectionKey.OP_READ;
     private static final int KEY_WRITE = SelectionKey.OP_WRITE;
 
-    private String host = DEFAULT_HOST;
+    private String host = TEST_HOST;
     private int port = DEFAULT_PORT;
-
     private InetSocketAddress serverAddress;
     private SocketChannel channel;
     private Selector selector;
@@ -65,11 +74,8 @@ public class Client implements IClient {
     }
 
     public Client(String host, int port) {
-
-        if (checkHostAvailability(host)) {
-            this.host = host;
-            this.port = port;
-        }
+        this.host = host;
+        this.port = port;
     }
 
     /*
@@ -99,20 +105,13 @@ public class Client implements IClient {
     /*
         FUNCTIONS
     */
-    private Boolean checkHostAvailability(String host) {
-        boolean available = false;
 
-        try {
-            available = InetAddress.getByName(host).isReachable(DEFAULT_TIMEOUT);
-            System.out.println("host available");
-
-        } catch (IOException e) {
-            System.out.println("host unavailable");
-            e.printStackTrace();
-        }
-        return available;
-    }
-
+    /**
+     * Initializing address, selector and channel for non-blocking io.
+     * Operations - CONNECT, READ, WRITE
+     *
+     * @return true if initialization was successful and false, if not
+     */
     private boolean init() {
         try {
             serverAddress = new InetSocketAddress(host, port);
@@ -120,8 +119,8 @@ public class Client implements IClient {
             channel = SocketChannel.open();
             channel.configureBlocking(false);
 
-//            int ops = channel.validOps();
-            channelKey = channel.register(selector, SelectionKey.OP_CONNECT);
+            int ops = KEY_CONNECT | KEY_WRITE | KEY_READ;
+            channelKey = channel.register(selector, ops);
             log.logi("configure finished");
             return true;
 
@@ -149,7 +148,6 @@ public class Client implements IClient {
                         System.out.println("connection was interrupted");
                     }
                 }
-//                log.logi("connected to " + channel.getRemoteAddress());
                 setConnected(true);
 
             } catch (IOException e) {
@@ -167,67 +165,104 @@ public class Client implements IClient {
 
     private void select(ByteBuffer buffer) {
         log.logi("trying to selection");
-
         try {
-            selector.selectNow();
-            if (channelKey.isReadable() && channelKey.isValid()) {
-                read(buffer);
-            }
-            if (channelKey.isWritable() && channelKey.isValid()) {
-                write(buffer);
-            }
+            int numConnections = selector.selectNow();
 
+            log.logi("connections count: " + numConnections);
+
+            if (numConnections > 0) {
+                SelectionKey key;
+                Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
+                while (keys.hasNext()) {
+                    key = keys.next();
+                    keys.remove();
+
+                    if (!key.isValid()) {
+                        continue;
+                    }
+                    log.logi("key state: " + key.isReadable() + ", " + key.isWritable());
+
+                    if (channelKey.isReadable() && channelKey.isValid()) {
+                        log.logi("before read");
+                        read();
+                        log.logi("after read");
+                    }
+                    if (channelKey.isWritable() && channelKey.isValid()) {
+                        log.logi("before write");
+                        write(buffer);
+                        log.logi("before write");
+                    }
+                }
+            }
         } catch (IOException e) {
             e.printStackTrace();
+        } finally {
+            selector.selectedKeys().clear();
         }
     }
 
     private void write(ByteBuffer buffer) {
         try {
+            log.logi("trying to send data");
             int bytesWrite = channel.write(buffer);
             log.logi("bytes write " + bytesWrite);
+            channelKey.interestOps(channelKey.interestOps() & ~KEY_WRITE);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void read() {
+        try {
+            log.logi("trying to read data");
+            ByteBuffer buffer = ByteBuffer.allocate(RCV_BUFFER_SIZE);
+            int bytesRead = channel.read(buffer);
+            String msg = Arrays.toString(buffer.array());
+            System.out.println("server echo: " + msg);
+
+            log.logi("bytes read " + bytesRead);
+            channelKey.interestOps(channelKey.interestOps() & ~KEY_READ);
 
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void read(ByteBuffer buffer) {
-        log.logi("read");
-
+    private void print(ByteBuffer buffer) {
+        String msg = Arrays.toString(buffer.array());
+        System.out.println(msg);
     }
 
     private void doSendData(Object data) {
+        ByteBuffer buffer = convertDataToByteBuffer(data);
+
         if (isConnected) {
-            log.logi("trying to send data");
+
             setCurrentOperation(KEY_WRITE);
-            ByteBuffer buffer = null;
-
-            if (data instanceof String) {
-                System.out.println("String");
-                buffer = ByteBuffer.wrap(((String) data).getBytes());
-            } else if (data instanceof Byte[]) {
-                System.out.println("byte[]");
-                try {
-                    buffer = ByteBuffer.wrap((byte[]) data);
-                }catch (ClassCastException cce){
-                    log.logi(cce.getMessage());
-                }
-            }
-
-
             select(buffer);
 
+            setCurrentOperation(KEY_READ);
+            select(buffer);
         } else {
+            setCurrentOperation(KEY_CONNECT);
             connect();
             doSendData(data);
         }
-
-
     }
 
-    private void doReadData() {
+    private ByteBuffer convertDataToByteBuffer(Object data) {
+        ByteBuffer buffer = null;
 
+        if (data instanceof String) {
+            buffer = ByteBuffer.wrap(((String) data).getBytes());
+        } else if (data instanceof Byte[]) {
+            try {
+                buffer = ByteBuffer.wrap((byte[]) data);
+            } catch (ClassCastException cce) {
+                log.logi(cce.getMessage());
+            }
+        }
+        return buffer;
     }
 
 }
