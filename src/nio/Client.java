@@ -238,11 +238,11 @@ public class Client implements IClient {
 
         if (isConnected) {
 
-            setCurrentOperation(KEY_WRITE);
+            setCurrentOperation(KEY_WRITE | KEY_READ);
             select(buffer);
 
-            setCurrentOperation(KEY_READ);
-            select(buffer);
+//            setCurrentOperation(KEY_READ);
+//            select(buffer);
         } else {
             setCurrentOperation(KEY_CONNECT);
             connect();
